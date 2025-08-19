@@ -44,6 +44,15 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type MerkleNodes<T> = StorageMap<_, Blake2_128Concat, u64, H256, OptionQuery>;
 
+	// Nullifiers that have been used (to prevent double-spending)
+	#[pallet::storage]
+	#[pallet::getter(fn nullifiers)]
+	pub type Nullifiers<T> = StorageMap<_, Blake2_128Concat, H256, bool, ValueQuery>;
+
+	// Nullifier count for tracking
+	#[pallet::storage]
+	#[pallet::getter(fn nullifier_count)]
+	pub type NullifierCount<T> = StorageValue<_, u64, ValueQuery>;
 
 	#[pallet::error]
 	pub enum Error<T> {
@@ -55,6 +64,8 @@ pub mod pallet {
 		NullifierAlreadyUsed,
 		/// Invalid note
 		InvalidNote,
+		/// Nullifier not found in Merkle tree
+		NullifierNotFound,
 	}
 
 	#[pallet::event]
@@ -64,6 +75,8 @@ pub mod pallet {
 		NoteAdded { note: H256, index: u64, root: H256 },
 		/// The Merkle root was updated
 		MerkleRootUpdated { new_root: H256 },
+		/// A nullifier was used
+		NullifierUsed { nullifier: H256 },
 	}
 
 	#[pallet::call]
@@ -110,6 +123,39 @@ pub mod pallet {
 			});
 			
 			Ok(())
+		}
+
+		/// Check if a nullifier exists in the Merkle tree
+		pub fn verify_nullifier_in_tree(nullifier: H256) -> bool {
+			let count = NoteCount::<T>::get();
+			
+			// Check all notes in the tree to see if any match the nullifier
+			for i in 0..count {
+				if let Some(note) = Notes::<T>::get(i) {
+					if note == nullifier {
+						return true;
+					}
+				}
+			}
+			
+			false
+		}
+
+		/// Mark a nullifier as used
+		pub fn mark_nullifier_used(nullifier: H256) {
+			// Check if nullifier has already been used
+			if !Nullifiers::<T>::contains_key(&nullifier) {
+				Nullifiers::<T>::insert(&nullifier, true);
+				NullifierCount::<T>::put(NullifierCount::<T>::get() + 1);
+				
+				// Emit event
+				Self::deposit_event(Event::NullifierUsed { nullifier });
+			}
+		}
+
+		/// Check if a nullifier has been used before
+		pub fn is_nullifier_used(nullifier: H256) -> bool {
+			Nullifiers::<T>::contains_key(&nullifier)
 		}
 
 		/// Update the Merkle tree by adding a new leaf

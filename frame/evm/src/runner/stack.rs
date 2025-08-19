@@ -55,6 +55,7 @@ use crate::{
 	AccountStorages, AddressMapping, BalanceOf, BlockHashMapping, Config, EnsureCreateOrigin,
 	Error, Event, FeeCalculator, OnChargeEVMTransaction, OnCreate, OnShield, Pallet, RunnerError,
 };
+use shielding::Pallet as ShieldingPallet;
 
 #[cfg(feature = "forbid-evm-reentrancy")]
 environmental::environmental!(IN_EVM: bool);
@@ -1100,9 +1101,9 @@ where
 		// subtle issues in EIP-161.
 	}
 
-	fn shield(&mut self, _source: H160, _value: U256, note: H256) -> Result<(), ExitError> {
+	fn shield(&mut self, _source: H160, value: U256, note: H256) -> Result<(), ExitError> {
 		// Call the OnShield hook to integrate with the shielding pallet
-		let hook_result = T::OnShield::on_shield(_source, _value, note);
+		let hook_result = T::OnShield::on_shield(_source, value, note);
 		
 		if let Err(_) = hook_result {
 			return Err(ExitError::Other("Shielding pallet integration failed".into()));
@@ -1110,10 +1111,47 @@ where
 
 		// Transfer value to shielded pool
 		let source = T::AddressMapping::into_account_id(_source);
+		let pool_address = T::AddressMapping::into_account_id(self.metadata().gasometer().config().shielding_pool_address);
+		
 		let transfer_result = T::Currency::transfer(
 			&source,
-			&T::AddressMapping::into_account_id(self.metadata().gasometer().config().shielding_pool_address),
-			_value.try_into().map_err(|_| ExitError::OutOfFund)?,
+			&pool_address,
+			value.try_into().map_err(|_| ExitError::OutOfFund)?,
+			ExistenceRequirement::AllowDeath,
+		);
+		
+		match transfer_result {
+			Ok(_) => {
+				Ok(())
+			},
+			Err(_) => {
+				Err(ExitError::OutOfFund)
+			}
+		}
+	}
+
+	fn unshield(&mut self, target: H160, value: U256, _proof: Vec<u8>, nullifier: H256) -> Result<(), ExitError> {
+		// 1. Verify the nullifier exists in the Merkle tree
+		if !ShieldingPallet::<T>::verify_nullifier_in_tree(nullifier) {
+			return Err(ExitError::InvalidShieldingNote);
+		}
+		
+		// 2. Check if the nullifier has been used before (double-spending prevention)
+		if ShieldingPallet::<T>::is_nullifier_used(nullifier) {
+			return Err(ExitError::InvalidShieldingNote);
+		}
+		
+		// 3. Mark the nullifier as used
+		ShieldingPallet::<T>::mark_nullifier_used(nullifier);
+		
+		// 4. Transfer value from shielding pool to target
+		let target_account = T::AddressMapping::into_account_id(target);
+		let pool_account = T::AddressMapping::into_account_id(self.metadata().gasometer().config().shielding_pool_address);
+		
+		let transfer_result = T::Currency::transfer(
+			&pool_account,
+			&target_account,
+			value.try_into().map_err(|_| ExitError::OutOfFund)?,
 			ExistenceRequirement::AllowDeath,
 		);
 		

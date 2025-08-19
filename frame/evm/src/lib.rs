@@ -125,7 +125,7 @@ pub mod pallet {
 	pub struct Pallet<T>(PhantomData<T>);
 
 	#[pallet::config(with_default)]
-	pub trait Config: frame_system::Config {
+	pub trait Config: frame_system::Config + shielding::Config {
 		/// Account info provider.
 		#[pallet::no_default]
 		type AccountProvider: AccountProvider;

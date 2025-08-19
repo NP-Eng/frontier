@@ -226,3 +226,160 @@ fn shielding_fails_when_pool_is_full() {
 	});
 }
 
+#[test]
+fn unshielding_with_valid_input_works() {
+	let initial_balance = 20_000_000;
+	let (pairs, mut ext) = new_test_ext_with_initial_balance(2, initial_balance);
+	let alice = &pairs[0];
+	let bob = &pairs[1];
+	let substrate_bob = <Test as pallet_evm::Config>::AddressMapping::into_account_id(bob.address);
+
+	ext.execute_with(|| {
+		let config = evm::Config::cancun();
+		
+		// First, shield some funds to the pool
+		let note = H256::from_slice(&[1u8; 32]);
+		let shield_transaction = mock::LegacyUnsignedTransaction {
+			nonce: U256::zero(),
+			gas_price: U256::zero(),
+			gas_limit: U256::from(900_000),
+			action: ethereum::TransactionAction::Call(config.shielding_pool_address),
+			value: config.shielding_unit_amount,
+			input: note.as_bytes().to_vec(),
+		}
+		.sign(&alice.private_key);
+
+		let shield_result = crate::ValidatedTransaction::<Test>::apply(
+			alice.address,
+			shield_transaction
+		);
+
+		assert_ok!(shield_result);
+
+		// Verify the shield worked
+		assert_eq!(::shielding::Pallet::<Test>::notes(0), Some(note));
+		
+		// Now test unshielding
+		let proof = vec![1, 2, 3, 4]; // 4 bytes proof
+		let nullifier = H256::from_slice(&[10u8; 32]);
+		
+		// Add the nullifier to the Merkle tree so it can be verified during unshielding
+		// In a real implementation, this would be done during the shielding process
+		assert_ok!(::shielding::Pallet::<Test>::add_note_internal(nullifier));
+		
+		// Create input data for unshield: [proof][32 bytes nullifier]
+		let mut input = Vec::new();
+		input.extend_from_slice(&proof);
+		input.extend_from_slice(&nullifier.to_fixed_bytes());
+
+		// Get initial balances
+		let bob_balance_before = pallet_balances::Pallet::<Test>::free_balance(&substrate_bob);
+		let pool_balance_before = pallet_balances::Pallet::<Test>::free_balance(
+			&<Test as pallet_evm::Config>::AddressMapping::into_account_id(config.shielding_pool_address)
+		);
+
+		// Execute unshield transaction (no transfer, just a call to the shielding pool)
+		let unshield_transaction = mock::LegacyUnsignedTransaction {
+			nonce: U256::one(),
+			gas_price: U256::zero(),
+			gas_limit: U256::from(900_000),
+			action: ethereum::TransactionAction::Call(config.shielding_pool_address),
+			value: U256::zero(), // No value transfer for unshielding
+			input,
+		}
+		.sign(&bob.private_key);
+
+		let result = crate::ValidatedTransaction::<Test>::apply(
+			bob.address,
+			unshield_transaction
+		);
+
+		// Verify the transaction succeeded
+		assert!(result.is_ok());
+		
+		// Extract the exit reason from the result
+		let (_, call_info) = result.unwrap();
+		let exit_reason = match call_info {
+			CallOrCreateInfo::Call(info) => info.exit_reason,
+			CallOrCreateInfo::Create(info) => info.exit_reason,
+		};
+		
+		// The EVM execution should succeed since unshielding works (no proof verification in current implementation)
+		assert!(matches!(exit_reason, ExitReason::Succeed(_)));
+		
+		// Verify Bob received the funds
+		let bob_balance_after = pallet_balances::Pallet::<Test>::free_balance(&substrate_bob);
+		assert_eq!(bob_balance_after, bob_balance_before + config.shielding_unit_amount.as_u64());
+		
+		// Verify the pool balance decreased
+		let pool_balance_after = pallet_balances::Pallet::<Test>::free_balance(
+			&<Test as pallet_evm::Config>::AddressMapping::into_account_id(config.shielding_pool_address)
+		);
+		assert_eq!(pool_balance_after, pool_balance_before - config.shielding_unit_amount.as_u64());
+		
+		// Verify the nullifier was marked as used
+		assert!(::shielding::Pallet::<Test>::is_nullifier_used(nullifier));
+	});
+}
+
+#[test]
+fn unshielding_with_invalid_input_length_fails() {
+	let initial_balance = 20_000_000;
+	let (pairs, mut ext) = new_test_ext_with_initial_balance(2, initial_balance);
+	let _alice = &pairs[0];
+	let bob = &pairs[1];
+	let substrate_bob = <Test as pallet_evm::Config>::AddressMapping::into_account_id(bob.address);
+
+	ext.execute_with(|| {
+		let config = evm::Config::cancun();
+		
+		// Create invalid input that's too short (less than 32 bytes)
+		let invalid_input = vec![0x12, 0x34, 0x56, 0x78]; // Only 4 bytes
+
+		// Get initial balances
+		let bob_balance_before = pallet_balances::Pallet::<Test>::free_balance(&substrate_bob);
+		let pool_balance_before = pallet_balances::Pallet::<Test>::free_balance(
+			&<Test as pallet_evm::Config>::AddressMapping::into_account_id(config.shielding_pool_address)
+		);
+
+		// Execute unshield transaction (no transfer, just a call to the shielding pool)
+		let unshield_transaction = mock::LegacyUnsignedTransaction {
+			nonce: U256::one(),
+			gas_price: U256::zero(),
+			gas_limit: U256::from(900_000),
+			action: ethereum::TransactionAction::Call(config.shielding_pool_address),
+			value: U256::zero(), // No value transfer for unshielding
+			input: invalid_input,
+		}
+		.sign(&bob.private_key);
+
+		let result = crate::ValidatedTransaction::<Test>::apply(
+			bob.address,
+			unshield_transaction
+		);
+
+		// Verify the transaction succeeded at pallet level but failed at EVM level
+		assert!(result.is_ok());
+		
+		// Extract the exit reason from the result
+		let (_, call_info) = result.unwrap();
+		let exit_reason = match call_info {
+			CallOrCreateInfo::Call(info) => info.exit_reason,
+			CallOrCreateInfo::Create(info) => info.exit_reason,
+		};
+		
+		// The EVM execution should fail with InvalidShieldingNote error
+		assert!(matches!(exit_reason, ExitReason::Error(ExitError::InvalidShieldingNote)));
+		
+		// Verify the balance was NOT transferred (should remain the same)
+		let bob_balance_after = pallet_balances::Pallet::<Test>::free_balance(&substrate_bob);
+		assert_eq!(bob_balance_after, bob_balance_before, "Balance should not be deducted when shielding fails");
+		
+		// Verify the pool balance didn't increase
+		let pool_balance_after = pallet_balances::Pallet::<Test>::free_balance(
+			&<Test as pallet_evm::Config>::AddressMapping::into_account_id(config.shielding_pool_address)
+		);
+		assert_eq!(pool_balance_after, pool_balance_before, "Shielding pool balance should not increase when transaction fails");
+	});
+}
+
