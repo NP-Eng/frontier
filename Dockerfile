@@ -22,5 +22,5 @@ RUN cd template/node && cargo build --release --bin frontier-template-node
 EXPOSE 30333 9933 9944 9615
 
 # Run the node
-ENTRYPOINT ["/app/template/node/target/release/frontier-template-node"]
-CMD ["--dev", "--rpc-cors=all", "--rpc-external", "--rpc-methods=Unsafe", "--rpc-port=9933"] 
+ENTRYPOINT ["/app/target/release/frontier-template-node"]
+CMD ["--dev", "--rpc-cors=all", "--rpc-external", "--rpc-methods=Unsafe", "--rpc-port=9933"]
