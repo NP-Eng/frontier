@@ -41,6 +41,7 @@ frame_support::construct_runtime! {
 		Timestamp: pallet_timestamp::{Pallet, Call, Storage},
 		EVM: pallet_evm::{Pallet, Call, Storage, Config<T>, Event<T>},
 		Ethereum: crate::{Pallet, Call, Storage, Event, Origin},
+		Shielding: shielding::{Pallet, Call, Storage, Event<T>},
 	}
 }
 
@@ -74,6 +75,15 @@ impl pallet_balances::Config for Test {
 #[derive_impl(pallet_timestamp::config_preludes::TestDefaultConfig)]
 impl pallet_timestamp::Config for Test {}
 
+parameter_types! {
+	pub const MaxTreeDepth: u32 = 4; // Smaller for testing (2^4 -1 = 15 notes)
+}
+
+impl shielding::Config for Test {
+	type RuntimeEvent = RuntimeEvent;
+	type MaxTreeDepth = MaxTreeDepth;
+}
+
 pub struct FindAuthorTruncated;
 impl FindAuthor<H160> for FindAuthorTruncated {
 	fn find_author<'a, I>(_digests: I) -> Option<H160>
@@ -98,13 +108,14 @@ impl pallet_evm::Config for Test {
 	type BlockHashMapping = crate::EthereumBlockHashMapping<Self>;
 	type CreateOriginFilter = EnsureAllowedCreateAddress<AllowedAddressesCreate>;
 	type CreateInnerOriginFilter = EnsureAllowedCreateAddress<AllowedAddressesCreateInner>;
-	type Currency = Balances;
+	type Currency = pallet_balances::Pallet<Self>;
 	type PrecompilesType = ();
 	type PrecompilesValue = ();
 	type Runner = pallet_evm::runner::stack::Runner<Self>;
 	type FindAuthor = FindAuthorTruncated;
 	type GasLimitStorageGrowthRatio = GasLimitStorageGrowthRatio;
 	type Timestamp = Timestamp;
+	type OnShield = ShieldingOnShield;
 }
 
 #[derive_impl(crate::config_preludes::TestDefaultConfig)]
@@ -412,5 +423,13 @@ impl EIP1559UnsignedTransaction {
 			r,
 			s,
 		})
+	}
+}
+
+pub struct ShieldingOnShield;
+impl pallet_evm::OnShield<Test> for ShieldingOnShield {
+	fn on_shield(_source: sp_core::H160, _value: sp_core::U256, note: sp_core::H256) -> Result<(), sp_runtime::DispatchError> {
+		let result = ::shielding::Pallet::<Test>::add_note_internal(note);
+		result
 	}
 }

@@ -24,7 +24,7 @@ use alloc::{
 };
 use core::{marker::PhantomData, mem};
 use evm::{
-	backend::Backend as BackendT,
+	backend::{Backend as BackendT},
 	executor::stack::{Accessed, StackExecutor, StackState as StackStateT, StackSubstateMetadata},
 	gasometer::{GasCost, StorageTarget},
 	ExitError, ExitReason, ExternalOperation, Opcode, Transfer,
@@ -53,7 +53,7 @@ use super::meter::StorageMeter;
 use crate::{
 	runner::Runner as RunnerT, AccountCodes, AccountCodesMetadata, AccountProvider,
 	AccountStorages, AddressMapping, BalanceOf, BlockHashMapping, Config, EnsureCreateOrigin,
-	Error, Event, FeeCalculator, OnChargeEVMTransaction, OnCreate, Pallet, RunnerError,
+	Error, Event, FeeCalculator, OnChargeEVMTransaction, OnCreate, OnShield, Pallet, RunnerError,
 };
 
 #[cfg(feature = "forbid-evm-reentrancy")]
@@ -552,7 +552,10 @@ where
 			weight_limit,
 			proof_size_base_cost,
 			measured_proof_size_before,
-			|executor| executor.transact_call(source, target, value, input, gas_limit, access_list),
+			|executor| {
+				// Continue with normal EVM execution
+				executor.transact_call(source, target, value, input, gas_limit, access_list)
+			},
 		)
 	}
 
@@ -1095,6 +1098,28 @@ where
 		// EVM pallet considers all accounts to exist, and distinguish
 		// only empty and non-empty accounts. This avoids many of the
 		// subtle issues in EIP-161.
+	}
+
+	fn shield(&mut self, _source: H160, _value: U256, note: H256) -> Result<(), ExitError> {
+		// Call the OnShield hook to integrate with the shielding pallet
+		let hook_result = T::OnShield::on_shield(_source, _value, note);
+		
+		if let Err(_) = hook_result {
+			return Err(ExitError::Other("Shielding pallet integration failed".into()));
+		}
+
+		// Transfer value to shielded pool
+		let source = T::AddressMapping::into_account_id(_source);
+		let transfer_result = T::Currency::transfer(
+			&source,
+			&T::AddressMapping::into_account_id(self.metadata().gasometer().config().shielding_pool_address),
+			_value.try_into().map_err(|_| ExitError::OutOfFund)?,
+			ExistenceRequirement::AllowDeath,
+		);
+		
+		transfer_result.map_err(|_| ExitError::OutOfFund)?;
+
+		Ok(())
 	}
 
 	fn is_cold(&self, address: H160) -> bool {
